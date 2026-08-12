@@ -1,0 +1,81 @@
+services:
+  postgres:
+    image: postgres:17-alpine
+    restart: unless-stopped
+    environment:
+      - POSTGRES_DB=order_automation
+      - POSTGRES_USER=order_app
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
+      - TZ=${TZ}
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U order_app -d order_automation"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  order-api:
+    build: ./services/order-api
+    restart: unless-stopped
+    environment:
+      - TZ=${TZ}
+      - FEISHU_WEBHOOK_URL=${FEISHU_WEBHOOK_URL:-}
+      - FEISHU_APP_ID=${FEISHU_APP_ID:-}
+      - FEISHU_APP_SECRET=${FEISHU_APP_SECRET:-}
+      - FEISHU_BITABLE_APP_TOKEN=${FEISHU_BITABLE_APP_TOKEN:-}
+      - FEISHU_BITABLE_TABLE_ID=${FEISHU_BITABLE_TABLE_ID:-}
+      - HTTP_PROXY=${CONTAINER_HTTP_PROXY:-}
+      - HTTPS_PROXY=${CONTAINER_HTTP_PROXY:-}
+      - NO_PROXY=localhost,127.0.0.1,postgres,order-api,n8n
+      - PGHOST=postgres
+      - PGPORT=5432
+      - PGDATABASE=order_automation
+      - PGUSER=order_app
+      - PGPASSWORD=${POSTGRES_PASSWORD}
+      - INBOUND_WEBHOOK_SECRET=${INBOUND_WEBHOOK_SECRET}
+      - REVIEW_API_KEY=${REVIEW_API_KEY}
+      - ADMIN_API_KEY=${ADMIN_API_KEY}
+      - INTERNAL_API_KEY=${INTERNAL_API_KEY}
+      - SEED_SAMPLE_DATA=${SEED_SAMPLE_DATA:-true}
+      - ENABLE_DAILY_REPORTS=${ENABLE_DAILY_REPORTS:-false}
+      - ENABLE_DEAD_LETTER_ALERTS=${ENABLE_DEAD_LETTER_ALERTS:-false}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    ports:
+      - "127.0.0.1:8080:8080"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/health')"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  n8n:
+    image: docker.n8n.io/n8nio/n8n:2.34.4
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:5678:5678"
+    environment:
+      - GENERIC_TIMEZONE=${GENERIC_TIMEZONE}
+      - TZ=${TZ}
+      - N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS=true
+      - N8N_SECURE_COOKIE=false
+      - N8N_DIAGNOSTICS_ENABLED=false
+      - N8N_PERSONALIZATION_ENABLED=false
+      - N8N_BLOCK_ENV_ACCESS_IN_NODE=false
+      - REVIEW_API_KEY=${REVIEW_API_KEY}
+      - INTERNAL_API_KEY=${INTERNAL_API_KEY}
+    volumes:
+      - n8n_data:/home/node/.n8n
+      - ./shared:/files
+      - ./workflows:/workflow-templates:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      order-api:
+        condition: service_healthy
+
+volumes:
+  n8n_data:
+  postgres_data:

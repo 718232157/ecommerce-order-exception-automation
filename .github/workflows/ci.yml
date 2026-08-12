@@ -1,0 +1,45 @@
+name: validate
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    env:
+      TZ: Asia/Shanghai
+      GENERIC_TIMEZONE: Asia/Shanghai
+      POSTGRES_PASSWORD: ci-postgres-password
+      INBOUND_WEBHOOK_SECRET: ci-inbound-secret
+      REVIEW_API_KEY: ci-review-key
+      ADMIN_API_KEY: ci-admin-key
+      INTERNAL_API_KEY: ci-internal-key
+      SEED_SAMPLE_DATA: "false"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Validate Python and n8n workflows
+        run: python scripts/validate_project.py
+      - name: Validate Docker Compose
+        run: docker compose config --quiet
+      - name: Start PostgreSQL and API
+        run: docker compose up -d --build postgres order-api
+      - name: Wait for readiness
+        run: |
+          for i in {1..30}; do
+            curl --fail --silent http://127.0.0.1:8080/health/ready && exit 0
+            sleep 2
+          done
+          docker compose logs order-api
+          exit 1
+      - name: Run black-box integration tests
+        run: python scripts/integration_test.py
+      - name: Print logs on failure
+        if: failure()
+        run: docker compose logs
+      - name: Stop services
+        if: always()
+        run: docker compose down -v

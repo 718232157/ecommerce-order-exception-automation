@@ -1,0 +1,13 @@
+{
+  "name": "04-每日异常运营报告",
+  "id": "DailyOpsReport01",
+  "nodes": [
+    {"parameters": {}, "id": "manual-report", "name": "手动生成日报", "type": "n8n-nodes-base.manualTrigger", "typeVersion": 1, "position": [-650, 100]},
+    {"parameters": {"rule": {"interval": [{"field": "cronExpression", "expression": "0 9 * * *"}]}}, "id": "daily-trigger", "name": "每天9点生成", "type": "n8n-nodes-base.scheduleTrigger", "typeVersion": 1.2, "position": [-650, -80]},
+    {"parameters": {"url": "http://order-api:8080/internal/reports/daily", "sendHeaders": true, "headerParameters": {"parameters": [{"name": "X-Internal-Key", "value": "={{ $env.INTERNAL_API_KEY }}"}]}, "options": {}}, "id": "get-report", "name": "汇总当日异常数据", "type": "n8n-nodes-base.httpRequest", "typeVersion": 4.2, "position": [-400, 0]},
+    {"parameters": {"jsCode": "const r=$json; const sev=Object.entries(r.bySeverity??{}).map(([k,v])=>`${k}:${v}`).join(' / ')||'无'; const types=Object.entries(r.byType??{}).map(([k,v])=>`${k}:${v}`).join('，')||'无'; const message=`【电商订单异常日报｜${r.date}】\\n新增异常：${r.newExceptions}\\n待人工复核：${r.pendingReview}\\n今日解决：${r.resolvedToday}\\n风险分布：${sev}\\n类型分布：${types}`; return [{json:{eventId:`daily-${r.date}`,category:'DAILY_REPORT',message,report:r}}];"}, "id": "format-report", "name": "生成运营日报文本", "type": "n8n-nodes-base.code", "typeVersion": 2, "position": [-150, 0]},
+    {"parameters": {"method": "POST", "url": "http://order-api:8080/internal/notifications/text", "sendHeaders": true, "headerParameters": {"parameters": [{"name": "X-Internal-Key", "value": "={{ $env.INTERNAL_API_KEY }}"}]}, "sendBody": true, "contentType": "raw", "rawContentType": "application/json", "body": "={{ JSON.stringify({eventId:$json.eventId,category:$json.category,message:$json.message}) }}", "options": {}}, "id": "send-report", "name": "受控发送飞书日报", "type": "n8n-nodes-base.httpRequest", "typeVersion": 4.2, "position": [100, 0]}
+  ],
+  "connections": {"手动生成日报": {"main": [[{"node": "汇总当日异常数据", "type": "main", "index": 0}]]}, "每天9点生成": {"main": [[{"node": "汇总当日异常数据", "type": "main", "index": 0}]]}, "汇总当日异常数据": {"main": [[{"node": "生成运营日报文本", "type": "main", "index": 0}]]}, "生成运营日报文本": {"main": [[{"node": "受控发送飞书日报", "type": "main", "index": 0}]]}},
+  "pinData": {}, "active": false, "settings": {"executionOrder": "v1"}, "versionId": "44444444-4444-4444-8444-444444444444", "meta": {"templateCredsSetupCompleted": true}, "tags": []
+}

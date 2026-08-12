@@ -1,0 +1,15 @@
+{
+  "name": "05-失败任务与死信监控",
+  "id": "DeadLetterWatch01",
+  "nodes": [
+    {"parameters": {}, "id": "manual-dead", "name": "手动检查死信", "type": "n8n-nodes-base.manualTrigger", "typeVersion": 1, "position": [-650, 100]},
+    {"parameters": {"rule": {"interval": [{"field": "minutes", "minutesInterval": 10}]}}, "id": "dead-trigger", "name": "每10分钟检查", "type": "n8n-nodes-base.scheduleTrigger", "typeVersion": 1.2, "position": [-650, -80]},
+    {"parameters": {"url": "http://order-api:8080/internal/outbox/dead", "sendHeaders": true, "headerParameters": {"parameters": [{"name": "X-Internal-Key", "value": "={{ $env.INTERNAL_API_KEY }}"}]}, "options": {}}, "id": "get-dead", "name": "查询死信任务", "type": "n8n-nodes-base.httpRequest", "typeVersion": 4.2, "position": [-400, 0]},
+    {"parameters": {"conditions": {"options": {"caseSensitive": true, "leftValue": "", "typeValidation": "strict", "version": 2}, "conditions": [{"id": "has-dead", "leftValue": "={{ $json.count }}", "rightValue": 0, "operator": {"type": "number", "operation": "gt"}}], "combinator": "and"}, "options": {}}, "id": "if-dead", "name": "是否存在死信", "type": "n8n-nodes-base.if", "typeVersion": 2.2, "position": [-150, 0]},
+    {"parameters": {"jsCode": "const ids=$json.items.map(x=>x.id).join(','); return [{json:{eventId:`dead-${new Date().toISOString().slice(0,16)}`,category:'DEAD_LETTER_ALERT',message:`【订单自动化告警】发现 ${$json.count} 条死信任务\\nOutbox ID：${ids}\\n请检查服务日志并由管理员确认后重试。`}}];"}, "id": "format-dead", "name": "生成死信告警", "type": "n8n-nodes-base.code", "typeVersion": 2, "position": [100, -100]},
+    {"parameters": {"method": "POST", "url": "http://order-api:8080/internal/notifications/text", "sendHeaders": true, "headerParameters": {"parameters": [{"name": "X-Internal-Key", "value": "={{ $env.INTERNAL_API_KEY }}"}]}, "sendBody": true, "contentType": "raw", "rawContentType": "application/json", "body": "={{ JSON.stringify($json) }}", "options": {}}, "id": "send-dead", "name": "受控发送运维告警", "type": "n8n-nodes-base.httpRequest", "typeVersion": 4.2, "position": [350, -100]},
+    {"parameters": {"jsCode": "return [{json:{healthy:true,message:'当前没有死信任务',checkedAt:new Date().toISOString()}}];"}, "id": "healthy-dead", "name": "记录队列健康", "type": "n8n-nodes-base.code", "typeVersion": 2, "position": [100, 110]}
+  ],
+  "connections": {"手动检查死信": {"main": [[{"node": "查询死信任务", "type": "main", "index": 0}]]}, "每10分钟检查": {"main": [[{"node": "查询死信任务", "type": "main", "index": 0}]]}, "查询死信任务": {"main": [[{"node": "是否存在死信", "type": "main", "index": 0}]]}, "是否存在死信": {"main": [[{"node": "生成死信告警", "type": "main", "index": 0}], [{"node": "记录队列健康", "type": "main", "index": 0}]]}, "生成死信告警": {"main": [[{"node": "受控发送运维告警", "type": "main", "index": 0}]]}},
+  "pinData": {}, "active": false, "settings": {"executionOrder": "v1"}, "versionId": "55555555-5555-4555-8555-555555555555", "meta": {"templateCredsSetupCompleted": true}, "tags": []
+}
