@@ -5,3 +5,4 @@ shared/*
 __pycache__/
 .pytest_cache/
 *.log
+work/

@@ -10,6 +10,8 @@ docker compose --env-file .env cp ./workflows n8n:/tmp/workflows
 docker compose --env-file .env exec -T n8n n8n import:workflow --separate --input=/tmp/workflows
 ```
 
+同机已有服务占用默认端口时，可以在 `.env` 设置 `ORDER_API_PORT` 和 `N8N_PORT`。服务器部署应同时设置 `PROTECT_READ_ENDPOINTS=true`，并通过网关限制可访问路径。
+
 随后分别发布 `workflows/` 中5条工作流，或在 n8n 页面中检查后发布。
 
 ## 常用命令

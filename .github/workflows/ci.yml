@@ -15,6 +15,10 @@ jobs:
       REVIEW_API_KEY: ci-review-key
       ADMIN_API_KEY: ci-admin-key
       INTERNAL_API_KEY: ci-internal-key
+      READ_API_KEY: ci-read-key
+      PROTECT_READ_ENDPOINTS: "true"
+      ENABLE_API_DOCS: "false"
+      NOTIFY_SEVERITIES: CRITICAL
       SEED_SAMPLE_DATA: "false"
     steps:
       - uses: actions/checkout@v4
@@ -23,6 +27,8 @@ jobs:
           python-version: "3.12"
       - name: Validate Python and n8n workflows
         run: python scripts/validate_project.py
+      - name: Validate shell launchers
+        run: bash -n setup.sh start.sh stop.sh configure-feishu.sh import-orders.sh
       - name: Validate Docker Compose
         run: docker compose config --quiet
       - name: Start PostgreSQL and API
@@ -37,6 +43,27 @@ jobs:
           exit 1
       - name: Run black-box integration tests
         run: python scripts/integration_test.py
+      - name: Import, publish and call n8n workflow
+        run: |
+          docker compose up -d n8n
+          for i in {1..45}; do
+            curl --fail --silent http://127.0.0.1:5678/healthz && break
+            sleep 2
+          done
+          docker compose exec -T n8n n8n import:workflow --separate --input=/workflow-templates/
+          for id in JUilG7xnUiQAOAYX U8GXSUjQqCWLtI2I PfNG53rh2exExojv DailyOpsReport01 DeadLetterWatch01; do
+            docker compose exec -T n8n n8n publish:workflow --id="$id"
+          done
+          docker compose restart n8n
+          payload='{"eventId":"ci-n8n-smoke","orderId":"CI-N8N-SMOKE","status":"SHIPPED","amount":"0.00","quantity":1,"stock":10,"riskScore":0,"sourcePlatform":"CI"}'
+          for i in {1..45}; do
+            if curl --fail --silent -X POST http://127.0.0.1:5678/webhook/order-exception \
+              -H 'Content-Type: application/json' -H 'X-Internal-Key: ci-internal-key' \
+              --data "$payload" | grep -q '"success":true'; then exit 0; fi
+            sleep 2
+          done
+          docker compose logs n8n
+          exit 1
       - name: Print logs on failure
         if: failure()
         run: docker compose logs

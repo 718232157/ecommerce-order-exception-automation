@@ -8,6 +8,7 @@ import urllib.error
 import urllib.request
 from contextlib import asynccontextmanager
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 from typing import Any, Literal
 
 from fastapi import FastAPI, Header, HTTPException, Request
@@ -28,6 +29,13 @@ FEISHU_API = "https://open.feishu.cn/open-apis"
 TOKEN_CACHE = {"value": "", "expires_at": 0.0}
 STOP_EVENT = threading.Event()
 SEED_SAMPLE_DATA = os.getenv("SEED_SAMPLE_DATA", "true").lower() in {"1", "true", "yes"}
+PROTECT_READ_ENDPOINTS = os.getenv("PROTECT_READ_ENDPOINTS", "false").lower() in {"1", "true", "yes"}
+ENABLE_API_DOCS = os.getenv("ENABLE_API_DOCS", "true").lower() in {"1", "true", "yes"}
+NOTIFY_SEVERITIES = {
+    value.strip().upper()
+    for value in os.getenv("NOTIFY_SEVERITIES", "CRITICAL").split(",")
+    if value.strip()
+}
 
 pool = ConnectionPool(DATABASE_URL, min_size=1, max_size=10, kwargs={"row_factory": dict_row}, open=False)
 
@@ -39,19 +47,23 @@ class Order(BaseModel):
     paidAt: datetime | None = None
     shippedAt: datetime | None = None
     refundRequestedAt: datetime | None = None
-    amount: float = Field(default=0, ge=0)
+    amount: Decimal = Field(default=Decimal("0"), ge=0, decimal_places=2)
     quantity: int = Field(default=1, ge=1)
     stock: int = Field(default=0, ge=0)
     riskScore: int = Field(default=0, ge=0, le=100)
     duplicatePayment: bool = False
     customer: str | None = None
+    sourcePlatform: str = Field(default="UNKNOWN", min_length=2, max_length=50)
+    storeId: str | None = Field(default=None, max_length=100)
+    currency: str = Field(default="CNY", pattern=r"^[A-Z]{3}$")
     eventId: str | None = Field(default=None, max_length=200)
 
 
 class Review(BaseModel):
-    status: str
+    status: Literal["APPROVED", "REJECTED", "RESOLVED"]
     reviewer: str = Field(min_length=1, max_length=100)
     note: str = Field(default="", max_length=1000)
+    expectedVersion: int = Field(ge=1)
 
 
 class RuleUpdate(BaseModel):
@@ -118,8 +130,12 @@ CREATE TABLE IF NOT EXISTS exceptions (
   first_detected_at timestamptz NOT NULL DEFAULT now(),
   last_detected_at timestamptz NOT NULL DEFAULT now(),
   resolved_at timestamptz,
+  resolved_by varchar(100),
+  resolution_reason text,
   version integer NOT NULL DEFAULT 1
 );
+ALTER TABLE exceptions ADD COLUMN IF NOT EXISTS resolved_by varchar(100);
+ALTER TABLE exceptions ADD COLUMN IF NOT EXISTS resolution_reason text;
 CREATE TABLE IF NOT EXISTS audit_log (
   id bigserial PRIMARY KEY,
   event_type varchar(50) NOT NULL,
@@ -143,6 +159,8 @@ CREATE TABLE IF NOT EXISTS outbox (
   processed_at timestamptz
 );
 CREATE INDEX IF NOT EXISTS idx_outbox_pending ON outbox(status,next_attempt_at);
+CREATE INDEX IF NOT EXISTS idx_exceptions_order_status ON exceptions(order_id,status);
+CREATE INDEX IF NOT EXISTS idx_inbound_events_order ON inbound_events(order_id,received_at DESC);
 """
 
 RULES = [
@@ -152,6 +170,21 @@ RULES = [
     ("REFUND_TIMEOUT", "MEDIUM", 24, "退款申请处理超时", "检查退款通道并在人工确认后重新发起"),
     ("DUPLICATE_PAYMENT", "CRITICAL", 0, "检测到重复支付", "冻结重复款项的后续处理，人工核对后原路退款"),
 ]
+
+EXCEPTION_LABELS = {
+    "SHIPMENT_TIMEOUT": "超时未发货",
+    "HIGH_RISK_ORDER": "高风险订单",
+    "INVENTORY_SHORTAGE": "库存不足",
+    "REFUND_TIMEOUT": "退款处理超时",
+    "DUPLICATE_PAYMENT": "重复支付",
+}
+SEVERITY_LABELS = {"CRITICAL": "紧急", "HIGH": "高", "MEDIUM": "中"}
+STATUS_LABELS = {
+    "PENDING_REVIEW": "待复核",
+    "APPROVED": "已通过",
+    "REJECTED": "已驳回",
+    "RESOLVED": "已解决",
+}
 
 
 def init_database():
@@ -244,9 +277,12 @@ def exception_upsert_in_transaction(conn, payload: dict, actor="SYSTEM"):
                status=CASE WHEN %s THEN 'PENDING_REVIEW' ELSE status END,
                reviewer=CASE WHEN %s THEN NULL ELSE reviewer END,
                review_note=CASE WHEN %s THEN NULL ELSE review_note END,
-               resolved_at=CASE WHEN %s THEN NULL ELSE resolved_at END,version=version+1
+               resolved_at=CASE WHEN %s THEN NULL ELSE resolved_at END,
+               resolved_by=CASE WHEN %s THEN NULL ELSE resolved_by END,
+               resolution_reason=CASE WHEN %s THEN NULL ELSE resolution_reason END,
+               version=version+1
                WHERE id=%s RETURNING *""",
-            (payload["severity"],payload["reason"],payload["suggestion"],reopened,reopened,reopened,reopened,existing["id"]),
+            (payload["severity"],payload["reason"],payload["suggestion"],reopened,reopened,reopened,reopened,reopened,reopened,existing["id"]),
         ).fetchone()
         is_new = False
     else:
@@ -263,8 +299,47 @@ def exception_upsert_in_transaction(conn, payload: dict, actor="SYSTEM"):
     result = serialize(item)
     result["_isNew"] = is_new
     result["_reopened"] = reopened
-    result["_shouldNotify"] = is_new or reopened
+    result["_shouldNotify"] = (is_new or reopened) and item["severity"] in NOTIFY_SEVERITIES
+    if not result["_shouldNotify"]:
+        result["_notificationPolicy"] = f"only {sorted(NOTIFY_SEVERITIES)} are sent immediately"
     return result
+
+
+def resolve_cleared_exceptions_in_transaction(conn, order_id: str, detected_types: set[str], actor: str):
+    """Close deterministic exceptions when a later full order snapshot no longer matches."""
+    active = list(
+        conn.execute(
+            """SELECT * FROM exceptions
+               WHERE order_id=%s AND status IN ('PENDING_REVIEW','APPROVED')
+               FOR UPDATE""",
+            (order_id,),
+        )
+    )
+    resolved = []
+    for existing in active:
+        if existing["exception_type"] in detected_types:
+            continue
+        item = conn.execute(
+            """UPDATE exceptions SET status='RESOLVED',resolved_at=now(),resolved_by='SYSTEM_RULE_RECOVERY',
+               resolution_reason='最新订单完整快照已不再命中异常规则',version=version+1
+               WHERE id=%s RETURNING *""",
+            (existing["id"],),
+        ).fetchone()
+        conn.execute(
+            """INSERT INTO audit_log(event_type,entity_type,entity_id,actor,detail)
+               VALUES('EXCEPTION_AUTO_RESOLVED','EXCEPTION',%s,%s,%s::jsonb)""",
+            (
+                item["exception_no"],
+                actor,
+                json.dumps(
+                    {"orderId": order_id, "exceptionType": item["exception_type"], "reason": item["resolution_reason"]},
+                    ensure_ascii=False,
+                ),
+            ),
+        )
+        enqueue(conn, f"BITABLE:{item['id']}:{item['version']}", "BITABLE_UPSERT", item["id"], {})
+        resolved.append(serialize(item))
+    return resolved
 
 
 def exception_upsert(payload: dict, actor="SYSTEM"):
@@ -316,7 +391,12 @@ def bitable(method, suffix, payload=None):
     return http_json(method,base+suffix,payload,{"Authorization":f"Bearer {token()}"})
 
 
-FIELDS=[("异常编号",1),("订单编号",1),("异常类型",3),("风险等级",3),("异常原因",1),("处理建议",1),("当前状态",3),("负责人",1),("复核意见",1),("首次发现时间",1),("最后发现时间",1)]
+FIELDS = [
+    ("异常编号", 1), ("订单编号", 1), ("来源平台", 3), ("店铺", 1),
+    ("订单金额", 1), ("异常类型", 3), ("风险等级", 3), ("异常原因", 1),
+    ("处理建议", 1), ("当前状态", 3), ("负责人", 1), ("复核意见", 1),
+    ("解决方式", 1), ("首次发现时间", 1), ("最后发现时间", 1), ("解决时间", 1),
+]
 
 
 def bootstrap_bitable():
@@ -329,8 +409,27 @@ def bootstrap_bitable():
     return {"configured":True,"createdFields":created}
 
 
-def bitable_fields(item):
-    return {"异常编号":item["exception_no"],"订单编号":item["order_id"],"异常类型":item["exception_type"],"风险等级":item["severity"],"异常原因":item["reason"],"处理建议":item["suggestion"],"当前状态":item["status"],"负责人":item.get("reviewer") or "待分配","复核意见":item.get("review_note") or "","首次发现时间":item["first_detected_at"].isoformat(),"最后发现时间":item["last_detected_at"].isoformat()}
+def bitable_fields(item, order_payload):
+    amount = order_payload.get("amount", 0)
+    currency = order_payload.get("currency", "CNY")
+    return {
+        "异常编号": item["exception_no"],
+        "订单编号": item["order_id"],
+        "来源平台": order_payload.get("sourcePlatform", "UNKNOWN"),
+        "店铺": order_payload.get("storeId") or "未提供",
+        "订单金额": f"{amount} {currency}",
+        "异常类型": EXCEPTION_LABELS.get(item["exception_type"], item["exception_type"]),
+        "风险等级": SEVERITY_LABELS.get(item["severity"], item["severity"]),
+        "异常原因": item["reason"],
+        "处理建议": item["suggestion"],
+        "当前状态": STATUS_LABELS.get(item["status"], item["status"]),
+        "负责人": item.get("reviewer") or "待分配",
+        "复核意见": item.get("review_note") or "",
+        "解决方式": item.get("resolution_reason") or "",
+        "首次发现时间": item["first_detected_at"].isoformat(),
+        "最后发现时间": item["last_detected_at"].isoformat(),
+        "解决时间": item["resolved_at"].isoformat() if item.get("resolved_at") else "",
+    }
 
 
 def find_bitable_record(exception_no):
@@ -352,23 +451,43 @@ def deliver(event):
         return "DONE"
     with pool.connection() as conn:
         item=conn.execute("SELECT * FROM exceptions WHERE id=%s",(event["aggregate_id"],)).fetchone()
+        order_row=conn.execute("SELECT payload FROM orders WHERE order_id=%s",(item["order_id"],)).fetchone() if item else None
     if not item: return
+    order_payload = order_row["payload"] if order_row else {}
     if event["event_type"]=="BITABLE_UPSERT":
         if not all(feishu_config().values()): return "SKIPPED"
         bootstrap_bitable()
         record_id=item["feishu_record_id"] or find_bitable_record(item["exception_no"])
         if record_id:
-            bitable("PUT",f"/records/{record_id}",{"fields":bitable_fields(item)})
+            bitable("PUT",f"/records/{record_id}",{"fields":bitable_fields(item, order_payload)})
             if not item["feishu_record_id"]:
                 with pool.connection() as conn: conn.execute("UPDATE exceptions SET feishu_record_id=%s WHERE id=%s",(record_id,item["id"])); conn.commit()
         else:
-            record_id=bitable("POST","/records",{"fields":bitable_fields(item)})["data"]["record"]["record_id"]
+            record_id=bitable("POST","/records",{"fields":bitable_fields(item, order_payload)})["data"]["record"]["record_id"]
             with pool.connection() as conn: conn.execute("UPDATE exceptions SET feishu_record_id=%s WHERE id=%s",(record_id,item["id"])); conn.commit()
     elif event["event_type"]=="FEISHU_NOTIFY":
         webhook=os.getenv("FEISHU_WEBHOOK_URL","").strip()
         if not webhook: return "SKIPPED"
-        text=f"【{item['severity']}】{item['exception_no']}｜订单 {item['order_id']}\n{item['reason']}\n建议：{item['suggestion']}"
-        http_json("POST",webhook,{"msg_type":"text","content":{"text":text}})
+        severity = SEVERITY_LABELS.get(item["severity"], item["severity"])
+        exception_type = EXCEPTION_LABELS.get(item["exception_type"], item["exception_type"])
+        card = {
+            "config": {"wide_screen_mode": True},
+            "header": {
+                "template": "red" if item["severity"] == "CRITICAL" else "orange",
+                "title": {"tag": "plain_text", "content": f"{severity}风险｜{exception_type}"},
+            },
+            "elements": [
+                {"tag": "div", "text": {"tag": "lark_md", "content": (
+                    f"**异常编号：** {item['exception_no']}\n"
+                    f"**订单编号：** {item['order_id']}\n"
+                    f"**来源：** {order_payload.get('sourcePlatform', 'UNKNOWN')} / {order_payload.get('storeId') or '未提供'}\n"
+                    f"**异常原因：** {item['reason']}\n"
+                    f"**处理建议：** {item['suggestion']}"
+                )}},
+                {"tag": "note", "elements": [{"tag": "plain_text", "content": "高风险动作必须由人工复核；重复命中不会重复通知。"}]},
+            ],
+        }
+        http_json("POST",webhook,{"msg_type":"interactive","card":card})
     return "DONE"
 
 
@@ -404,6 +523,17 @@ def require_api_key(value: str | None, env_name: str):
         raise HTTPException(401,f"invalid {env_name.lower()}")
 
 
+def require_read_access(api_key: str | None, internal_key: str | None):
+    if not PROTECT_READ_ENDPOINTS:
+        return
+    candidates = ((api_key, "READ_API_KEY"), (internal_key, "INTERNAL_API_KEY"))
+    for value, env_name in candidates:
+        expected = os.getenv(env_name, "")
+        if expected and value and hmac.compare_digest(expected, value):
+            return
+    raise HTTPException(401, "read endpoint authentication required")
+
+
 def process_order(order: Order, event_id: str, payload_hash: str, source: str):
     payload=order.model_dump(mode="json")
     results=[]
@@ -416,12 +546,25 @@ def process_order(order: Order, event_id: str, payload_hash: str, source: str):
         conn.execute("""INSERT INTO orders(order_id,payload,source) VALUES(%s,%s::jsonb,%s)
           ON CONFLICT(order_id) DO UPDATE SET payload=excluded.payload,source=excluded.source,updated_at=now()""",(order.orderId,json.dumps(payload,ensure_ascii=False),source))
         rules=active_rules(conn)
-        for finding in evaluate_order(order,rules):
+        findings = evaluate_order(order,rules)
+        for finding in findings:
             item=exception_upsert_in_transaction(conn,finding,source)
             if item["_shouldNotify"]:
                 enqueue(conn,f"NOTIFY:{item['id']}:{item['version']}","FEISHU_NOTIFY",item["id"],{})
             results.append(item)
-    return {"accepted":True,"duplicate":False,"eventId":event_id,"exceptions":results}
+        resolved = resolve_cleared_exceptions_in_transaction(
+            conn,
+            order.orderId,
+            {finding["exceptionType"] for finding in findings},
+            source,
+        )
+    return {
+        "accepted": True,
+        "duplicate": False,
+        "eventId": event_id,
+        "exceptions": results,
+        "resolvedExceptions": resolved,
+    }
 
 
 @asynccontextmanager
@@ -433,12 +576,19 @@ async def lifespan(app):
     STOP_EVENT.set(); worker.join(timeout=3); pool.close()
 
 
-app=FastAPI(title="Order Exception Automation API",version="2.0.0",lifespan=lifespan)
+app=FastAPI(
+    title="Order Exception Automation API",
+    version="2.1.0",
+    lifespan=lifespan,
+    docs_url="/docs" if ENABLE_API_DOCS else None,
+    redoc_url="/redoc" if ENABLE_API_DOCS else None,
+    openapi_url="/openapi.json" if ENABLE_API_DOCS else None,
+)
 
 
 @app.get("/health")
 @app.get("/health/live")
-def health(): return {"status":"ok","time":now_iso(),"version":"2.0.0"}
+def health(): return {"status":"ok","time":now_iso(),"version":"2.1.0"}
 
 
 @app.get("/health/ready")
@@ -448,7 +598,8 @@ def ready():
 
 
 @app.get("/orders")
-def orders():
+def orders(x_api_key:str|None=Header(None,alias="X-API-Key"),x_internal_key:str|None=Header(None,alias="X-Internal-Key")):
+    require_read_access(x_api_key,x_internal_key)
     with pool.connection() as conn: return [row["payload"] for row in conn.execute("SELECT payload FROM orders ORDER BY order_id")]
 
 
@@ -485,12 +636,14 @@ def notify(payload:dict,x_internal_key:str|None=Header(None,alias="X-Internal-Ke
 
 
 @app.get("/exceptions")
-def list_exceptions():
+def list_exceptions(x_api_key:str|None=Header(None,alias="X-API-Key"),x_internal_key:str|None=Header(None,alias="X-Internal-Key")):
+    require_read_access(x_api_key,x_internal_key)
     with pool.connection() as conn: return [serialize(x) for x in conn.execute("SELECT * FROM exceptions ORDER BY first_detected_at,id")]
 
 
 @app.get("/exceptions/{exception_id}")
-def get_exception(exception_id:int):
+def get_exception(exception_id:int,x_api_key:str|None=Header(None,alias="X-API-Key"),x_internal_key:str|None=Header(None,alias="X-Internal-Key")):
+    require_read_access(x_api_key,x_internal_key)
     with pool.connection() as conn: item=conn.execute("SELECT * FROM exceptions WHERE id=%s",(exception_id,)).fetchone()
     if not item: raise HTTPException(404,"exception not found")
     return serialize(item)
@@ -499,12 +652,22 @@ def get_exception(exception_id:int):
 @app.post("/exceptions/{exception_id}/review")
 def review(exception_id:int,review:Review,x_api_key:str|None=Header(None,alias="X-API-Key")):
     require_api_key(x_api_key,"REVIEW_API_KEY")
-    if review.status not in {"APPROVED","REJECTED","RESOLVED"}: raise HTTPException(400,"invalid status")
     with pool.connection() as conn, conn.transaction():
-        item=conn.execute("""UPDATE exceptions SET status=%s,reviewer=%s,review_note=%s,resolved_at=CASE WHEN %s='RESOLVED' THEN now() ELSE resolved_at END,version=version+1
-          WHERE id=%s RETURNING *""",(review.status,review.reviewer,review.note,review.status,exception_id)).fetchone()
-        if not item: raise HTTPException(404,"exception not found")
-        conn.execute("INSERT INTO audit_log(event_type,entity_type,entity_id,actor,detail) VALUES('MANUAL_REVIEW','EXCEPTION',%s,%s,%s::jsonb)",(item["exception_no"],review.reviewer,review.model_dump_json()))
+        current=conn.execute("SELECT * FROM exceptions WHERE id=%s FOR UPDATE",(exception_id,)).fetchone()
+        if not current: raise HTTPException(404,"exception not found")
+        if current["version"] != review.expectedVersion:
+            raise HTTPException(409,{"message":"exception was updated by another process","currentVersion":current["version"],"currentStatus":current["status"]})
+        allowed={"PENDING_REVIEW":{"APPROVED","REJECTED","RESOLVED"},"APPROVED":{"RESOLVED"}}
+        if review.status not in allowed.get(current["status"],set()):
+            raise HTTPException(409,{"message":"invalid status transition","from":current["status"],"to":review.status})
+        closes = review.status in {"REJECTED","RESOLVED"}
+        item=conn.execute("""UPDATE exceptions SET status=%s,reviewer=%s,review_note=%s,
+          resolved_at=CASE WHEN %s THEN now() ELSE NULL END,
+          resolved_by=CASE WHEN %s THEN %s ELSE NULL END,
+          resolution_reason=CASE WHEN %s THEN %s ELSE NULL END,version=version+1
+          WHERE id=%s RETURNING *""",(review.status,review.reviewer,review.note,closes,closes,review.reviewer,closes,review.note or f"人工{review.status}",exception_id)).fetchone()
+        detail={**review.model_dump(),"previousStatus":current["status"],"newVersion":item["version"]}
+        conn.execute("INSERT INTO audit_log(event_type,entity_type,entity_id,actor,detail) VALUES('MANUAL_REVIEW','EXCEPTION',%s,%s,%s::jsonb)",(item["exception_no"],review.reviewer,json.dumps(detail,ensure_ascii=False)))
         enqueue(conn,f"BITABLE:{item['id']}:{item['version']}","BITABLE_UPSERT",item["id"],{})
     result=serialize(item); result["_feishu"]={"queued":True,"synced":False,"recordId":item["feishu_record_id"]}; return result
 
@@ -521,7 +684,8 @@ def feishu_status():
 
 
 @app.get("/rules")
-def list_rules():
+def list_rules(x_api_key:str|None=Header(None,alias="X-API-Key"),x_internal_key:str|None=Header(None,alias="X-Internal-Key")):
+    require_read_access(x_api_key,x_internal_key)
     with pool.connection() as conn: return [serialize(x) for x in conn.execute("SELECT * FROM exception_rules ORDER BY rule_code")]
 
 
@@ -541,13 +705,15 @@ def update_rule(rule_code:str,payload:RuleUpdate,x_api_key:str|None=Header(None,
 
 
 @app.get("/stats")
-def stats():
+def stats(x_api_key:str|None=Header(None,alias="X-API-Key"),x_internal_key:str|None=Header(None,alias="X-Internal-Key")):
+    require_read_access(x_api_key,x_internal_key)
     with pool.connection() as conn:
         return {"totalExceptions":conn.execute("SELECT count(*) count FROM exceptions").fetchone()["count"],"pendingReview":conn.execute("SELECT count(*) count FROM exceptions WHERE status='PENDING_REVIEW'").fetchone()["count"],"outbox":list(conn.execute("SELECT status,count(*) count FROM outbox GROUP BY status ORDER BY status"))}
 
 
 @app.get("/events")
-def events():
+def events(x_api_key:str|None=Header(None,alias="X-API-Key"),x_internal_key:str|None=Header(None,alias="X-Internal-Key")):
+    require_read_access(x_api_key,x_internal_key)
     with pool.connection() as conn: return [serialize(x) for x in conn.execute("SELECT * FROM audit_log ORDER BY id DESC LIMIT 100")]
 
 
