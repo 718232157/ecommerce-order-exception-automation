@@ -8,6 +8,8 @@
 
 `n8n + FastAPI + PostgreSQL + 飞书`，本地 Docker 可完整运行。
 
+> **数据与适用范围**：仓库不包含任何企业真实订单或个人信息。示例、截图和自动化验收均使用可复现的合成数据，用于验证流程、接口和故障边界，不代表真实企业的订单分布或业务收益。系统按真实订单异常处置链路设计；企业接入时仍需使用授权后的脱敏数据校准规则，并由业务负责人确认 SLA 和处置策略。
+
 ## 一眼看懂流程
 
 ```mermaid
@@ -57,6 +59,8 @@ bash setup.sh
 ```
 
 脚本会生成本地密钥、启动 PostgreSQL、API 和 n8n，并导入发布 5 条工作流。首次进入 n8n 时创建本地管理员账号，然后打开 `02-定时批量订单巡检`，点击 `Execute workflow`。
+
+如果准备在企业内部小范围试运行，请不要直接连接生产订单和业务群，先按照 [企业内部试运行手册](docs/pilot-handbook.md) 完成角色分工、隔离部署、规则确认、验收和退出检查。
 
 | 入口 | 地址 |
 |---|---|
@@ -186,7 +190,7 @@ python scripts/integration_test.py  # 需要已启动的隔离环境
 - 服务器部署时应启用读取鉴权、关闭 API 文档并开启 n8n 安全 Cookie。
 - 生产接入前请完成 [上线检查清单](docs/production-checklist.md) 和 [安全说明](SECURITY.md)。
 
-进一步阅读：[架构设计](docs/architecture.md) · [运维手册](docs/operations-runbook.md) · [高级部署](docs/advanced-deployment.md)
+进一步阅读：[企业内部试运行手册](docs/pilot-handbook.md) · [架构设计](docs/architecture.md) · [运维手册](docs/operations-runbook.md) · [高级部署](docs/advanced-deployment.md)
 
 ## License
 
