@@ -60,6 +60,7 @@ flowchart TB
     TX --> REPORT["每日运营报告"]
     TX --> DLQ["重试与死信监控"]
 
+    style CORE fill:#ffffff,stroke:#cbd5e1,stroke-width:1px,color:#475569;
     classDef source fill:#eef2ff,stroke:#6366f1,color:#1e1b4b;
     classDef core fill:#fff7ed,stroke:#f97316,color:#7c2d12;
     classDef feishu fill:#ecfdf5,stroke:#10b981,color:#064e3b;
