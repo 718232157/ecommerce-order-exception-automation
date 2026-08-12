@@ -1,7 +1,5 @@
 # 电商订单异常处理自动化
 
-[![validate](https://github.com/718232157/ecommerce-order-exception-automation/actions/workflows/ci.yml/badge.svg)](https://github.com/718232157/ecommerce-order-exception-automation/actions/workflows/ci.yml)
-
 企业通常不是完全看不到异常，而是异常标记留在订单、仓储或退款系统的页面里，仍要运营人员反复查找；发现以后，谁处理、是否重复通知、订单恢复后是否关闭也容易断链。
 
 这个项目提供一层独立的订单异常处置流程，不替代企业现有的订单管理系统（ERP / OMS）。订单快照从现有系统、平台连接程序（适配器）或 CSV 进入后，系统自动识别和分级：紧急异常立即通知飞书群，其他异常进入台账并可按需汇总日报；后续复核、恢复和外部同步均可追踪。
