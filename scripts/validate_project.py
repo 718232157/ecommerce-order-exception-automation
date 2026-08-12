@@ -46,6 +46,11 @@ batch = json.loads((ROOT / "workflows" / "02-batch-order-scan.json").read_text(e
 batch_reader = next(node for node in batch["nodes"] if node["name"] == "读取待巡检订单")
 if not batch_reader["parameters"].get("sendHeaders"):
     raise AssertionError("batch order read must support protected read endpoints")
+batch_event_builder = next(node for node in batch["nodes"] if node["name"] == "拆分并生成巡检事件")
+batch_event_code = batch_event_builder["parameters"].get("jsCode", "")
+for required_fragment in ("delete payload.eventId", "fingerprint(stable(payload))", "Math.floor(Date.now()/1800000)"):
+    if required_fragment not in batch_event_code:
+        raise AssertionError("batch scan event IDs must distinguish changed snapshots within one scan window")
 
 review = json.loads((ROOT / "workflows" / "03-manual-review.json").read_text(encoding="utf-8"))
 review_writer = next(node for node in review["nodes"] if node["name"] == "保存复核与审计日志")

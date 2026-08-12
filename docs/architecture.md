@@ -7,6 +7,7 @@
 ## 一致性设计
 
 - `inbound_events.event_id`：消息幂等；同 ID 不同正文拒绝处理。
+- 批量巡检事件 ID 由巡检时间窗与订单快照指纹共同生成：相同快照可安全重试，窗口内变化不会发生幂等键冲突。
 - `exceptions.idempotency_key`：同一订单同类未解决异常只保留一张工单。
 - `business_sequences`：在 PostgreSQL 事务中生成每日业务编号，与内部自增主键解耦。
 - 异常、审计和 Outbox 同事务提交；外部飞书调用不占用订单事务。
