@@ -6,6 +6,12 @@
 
 项目使用合成订单和脱敏样例做可复现验收，不包含任何企业客户数据，也不伪造淘宝、京东、抖店等平台授权。飞书、n8n、PostgreSQL、Webhook 和事务链路均可在本地真实运行。
 
+## 运行实景
+
+下面是本地验收环境实拍：5 条工作流均已导入并发布，覆盖实时接入、定时补偿、人工复核、运营日报和失败任务监控。
+
+![5 条已发布的 n8n 订单异常工作流](docs/images/n8n-workflows-overview.png)
+
 ## 10分钟看到完整流程
 
 ### Windows
@@ -34,17 +40,34 @@ bash setup.sh
 ## 业务闭环
 
 ```mermaid
-flowchart LR
-    A["ERP / 平台适配器 / CSV"] --> B["签名、标准化与事件幂等"]
-    B --> C["可配置确定性规则"]
-    C --> D["异常、审计与 Outbox 同事务提交"]
-    D --> E["飞书多维表格台账"]
-    D --> F["紧急异常群告警"]
-    E --> G["人工复核"]
-    G --> H["状态回写与审计"]
-    B --> I["新快照不再命中"]
-    I --> J["自动解决并同步台账"]
-    D --> K["日报与死信监控"]
+flowchart TB
+    SOURCE["ERP / 平台适配器 / CSV"] --> INGRESS["接入层<br/>HMAC 验签 · 标准化 · eventId 幂等"]
+
+    subgraph CORE["规则与事务核心"]
+        INGRESS --> RULES["5 类确定性异常规则"]
+        RULES --> TX["订单 · 异常 · 审计 · Outbox<br/>同一 PostgreSQL 事务"]
+    end
+
+    TX --> LEDGER["飞书多维表格<br/>异常台账"]
+    TX --> ALERT["CRITICAL<br/>群即时告警"]
+    LEDGER --> REVIEW["人工复核<br/>expectedVersion 乐观锁"]
+    REVIEW --> WRITEBACK["状态回写与审计"]
+    WRITEBACK --> LEDGER
+
+    INGRESS --> RECOVERY["新快照不再命中规则"]
+    RECOVERY --> RESOLVED["自动解决<br/>审计并同步台账"]
+
+    TX --> REPORT["每日运营报告"]
+    TX --> DLQ["重试与死信监控"]
+
+    classDef source fill:#eef2ff,stroke:#6366f1,color:#1e1b4b;
+    classDef core fill:#fff7ed,stroke:#f97316,color:#7c2d12;
+    classDef feishu fill:#ecfdf5,stroke:#10b981,color:#064e3b;
+    classDef ops fill:#f8fafc,stroke:#64748b,color:#0f172a;
+    class SOURCE,INGRESS source;
+    class RULES,TX core;
+    class LEDGER,ALERT,REVIEW,WRITEBACK,RESOLVED feishu;
+    class RECOVERY,REPORT,DLQ ops;
 ```
 
 ### 状态与并发规则
@@ -66,6 +89,41 @@ flowchart LR
 | 04 每日异常运营报告 | 每天9点/手动 | 新增、待处理、解决和风险分布 |
 | 05 失败任务与死信监控 | 每10分钟/手动 | 检查死信并生成受控运维告警 |
 
+<details>
+<summary><strong>展开查看 5 条已发布工作流</strong></summary>
+
+### 01 实时订单异常识别与通知
+
+Webhook 接收单条订单完整快照，完成鉴权、规则处理和风险分流，分别返回正常、一般异常或紧急处置结果。
+
+![实时订单异常识别与通知工作流](docs/images/workflow-01-realtime.png)
+
+### 02 定时批量订单巡检
+
+每 30 分钟扫描存量订单，以“时间窗 + 快照指纹”生成幂等事件，逐单处理后保存巡检审计并生成风险摘要。
+
+![定时批量订单巡检工作流](docs/images/workflow-02-batch-scan.png)
+
+### 03 高风险异常人工复核
+
+复核请求先校验身份和当前版本；已解决工单拒绝重复复核，其余结论通过乐观锁写入异常状态和审计日志。
+
+![高风险异常人工复核工作流](docs/images/workflow-03-manual-review.png)
+
+### 04 每日异常运营报告
+
+每天 9 点或手动汇总新增异常、待复核数量、解决情况以及类型和风险分布；发送开关默认关闭。
+
+![每日异常运营报告工作流](docs/images/workflow-04-daily-report.png)
+
+### 05 失败任务与死信监控
+
+每 10 分钟检查 Outbox 死信；发现异常时生成受控运维告警，没有死信时记录队列健康状态。
+
+![失败任务与死信监控工作流](docs/images/workflow-05-dead-letter.png)
+
+</details>
+
 ## 飞书集成与通知策略
 
 双击 `configure-feishu.cmd` 或运行 `bash configure-feishu.sh`，按提示填写群机器人 Webhook、飞书应用凭证、多维表格 Token 和 Table ID。系统会创建缺失字段，并将后续异常写入真实台账。
@@ -84,6 +142,12 @@ ENABLE_DEAD_LETTER_ALERTS=true
 ```
 
 飞书配置见 [飞书接入步骤](docs/feishu-setup.md)。高风险动作只生成建议和复核任务，系统不会自动退款、冻结或取消订单。
+
+### 异常台账实景
+
+同一异常通过保存的飞书 Record ID 持续更新，不会因为重复巡检创建多行。下图数据来自合成订单与本地验收流程。
+
+![飞书多维表格订单异常台账](docs/images/feishu-bitable-ledger.png)
 
 ## 可复现的合成业务数据
 
