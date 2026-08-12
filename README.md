@@ -13,24 +13,20 @@
 ```mermaid
 flowchart LR
     A["订单完整快照"] --> B["规则识别"]
-    B --> C{"命中异常？"}
-    C -- "否" --> D["正常响应"]
-    C -- "是" --> E["异常台账 + 审计 + Outbox"]
-    E --> F{"CRITICAL？"}
-    F -- "是" --> G["飞书即时告警"]
-    F -- "否" --> H["进入待处理队列"]
-    G --> I["人工复核"]
-    H --> I
-    I --> J["状态回写与审计"]
-    A -. "后续快照恢复正常" .-> K["自动解决异常"]
-    K --> J
+    B -- "正常" --> C["正常响应"]
+    B -- "异常" --> D["异常台账与审计"]
+    D --> E["风险分级与飞书通知"]
+    E --> F["人工复核"]
+    F --> G["状态回写"]
+    A -. "恢复快照" .-> H["自动解决异常"]
+    H --> G
 
     classDef input fill:#eef2ff,stroke:#6366f1,color:#1e1b4b;
     classDef core fill:#fff7ed,stroke:#f97316,color:#7c2d12;
     classDef action fill:#ecfdf5,stroke:#10b981,color:#064e3b;
     class A input;
-    class B,C,E,F core;
-    class D,G,H,I,J,K action;
+    class B,D,E core;
+    class C,F,G,H action;
 ```
 
 实时 Webhook 负责快速响应，定时巡检负责补偿；订单、异常、审计和 Outbox 在同一 PostgreSQL 事务中提交。
