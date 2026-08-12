@@ -23,13 +23,15 @@ def convert(row, source):
         "paidAt": row.get("paidAt") or None,
         "shippedAt": row.get("shippedAt") or None,
         "refundRequestedAt": row.get("refundRequestedAt") or None,
-        "amount": float(row.get("amount") or 0),
+        "amount": row.get("amount") or "0.00",
+        "currency": (row.get("currency") or "CNY").upper(),
         "quantity": int(row.get("quantity") or 1),
         "stock": int(row.get("stock") or 0),
         "riskScore": int(row.get("riskScore") or 0),
         "duplicatePayment": (row.get("duplicatePayment") or "").lower() in BOOL_TRUE,
         "customer": row.get("customer") or None,
-        "source": source,
+        "sourcePlatform": row.get("sourcePlatform") or source,
+        "storeId": row.get("storeId") or None,
     }
 
 

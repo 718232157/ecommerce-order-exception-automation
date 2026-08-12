@@ -32,4 +32,12 @@ ENABLE_DAILY_REPORTS=true
 ENABLE_DEAD_LETTER_ALERTS=true
 ```
 
+即时异常通知默认只发送 `CRITICAL`，避免测试或高频异常刷屏。需要调整时修改：
+
+```dotenv
+NOTIFY_SEVERITIES=CRITICAL,HIGH
+```
+
+修改前应确认群负责人、值班机制和预期消息量。批量验收必须使用独立测试群。
+
 然后双击 `stop.cmd`、`start.cmd` 使配置生效。

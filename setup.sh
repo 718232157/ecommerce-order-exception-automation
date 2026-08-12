@@ -19,6 +19,18 @@ wait_url() {
   echo "Service startup timed out: $url" >&2
   exit 1
 }
+wait_workflow() {
+  local url="$1" internal_key="$2" event_id
+  event_id="setup-smoke:$(date +%s)"
+  for _ in $(seq 1 30); do
+    if curl -fsS --max-time 5 -X POST "$url" \
+      -H 'Content-Type: application/json' -H "X-Internal-Key: ${internal_key}" \
+      -d "{\"eventId\":\"${event_id}\",\"orderId\":\"SETUP-SMOKE-ORDER\",\"status\":\"SHIPPED\",\"amount\":\"0.00\",\"quantity\":1,\"stock\":10,\"riskScore\":0,\"sourcePlatform\":\"SETUP_SMOKE\"}" >/dev/null 2>&1; then return 0; fi
+    sleep 2
+  done
+  echo "Workflow webhook verification failed: $url" >&2
+  exit 1
+}
 
 step "Checking Docker"
 command -v docker >/dev/null || { echo "Install and start Docker Desktop first: https://www.docker.com/products/docker-desktop/"; exit 1; }
@@ -31,6 +43,8 @@ if [[ ! -f .env ]]; then
   cat > .env <<EOF
 GENERIC_TIMEZONE=Asia/Shanghai
 TZ=Asia/Shanghai
+ORDER_API_PORT=8080
+N8N_PORT=5678
 FEISHU_WEBHOOK_URL=
 FEISHU_APP_ID=
 FEISHU_APP_SECRET=
@@ -42,19 +56,30 @@ INBOUND_WEBHOOK_SECRET=$(secret)
 REVIEW_API_KEY=$(secret)
 ADMIN_API_KEY=$(secret)
 INTERNAL_API_KEY=$(secret)
+READ_API_KEY=$(secret)
+PROTECT_READ_ENDPOINTS=false
+ENABLE_API_DOCS=true
+NOTIFY_SEVERITIES=CRITICAL
 SEED_SAMPLE_DATA=true
 ENABLE_DAILY_REPORTS=false
 ENABLE_DEAD_LETTER_ALERTS=false
+N8N_SECURE_COOKIE=false
 EOF
   chmod 600 .env
 else
   echo "Keeping existing .env; no keys were overwritten."
 fi
 
+ORDER_API_PORT="$(sed -n 's/^ORDER_API_PORT=//p' .env | tail -n 1)"
+N8N_PORT="$(sed -n 's/^N8N_PORT=//p' .env | tail -n 1)"
+INTERNAL_API_KEY="$(sed -n 's/^INTERNAL_API_KEY=//p' .env | tail -n 1)"
+ORDER_API_PORT="${ORDER_API_PORT:-8080}"
+N8N_PORT="${N8N_PORT:-5678}"
+
 step "Starting PostgreSQL, order API and n8n"
 docker compose --env-file .env up -d --build
-wait_url http://127.0.0.1:8080/health/ready
-wait_url http://127.0.0.1:5678/healthz
+wait_url "http://127.0.0.1:${ORDER_API_PORT}/health/ready"
+wait_url "http://127.0.0.1:${N8N_PORT}/healthz"
 
 step "Importing and publishing 5 workflows"
 imported=false
@@ -72,14 +97,16 @@ for id in JUilG7xnUiQAOAYX U8GXSUjQqCWLtI2I PfNG53rh2exExojv DailyOpsReport01 De
   docker compose --env-file .env exec -T n8n n8n publish:workflow --id="$id"
 done
 docker compose --env-file .env restart n8n >/dev/null
-wait_url http://127.0.0.1:5678/healthz
+wait_url "http://127.0.0.1:${N8N_PORT}/healthz"
+wait_workflow "http://127.0.0.1:${N8N_PORT}/webhook/order-exception" "$INTERNAL_API_KEY"
 
 step "Installation complete"
 echo "Create your n8n administrator account in the browser once."
-echo "n8n: http://127.0.0.1:5678"
-echo "API docs: http://127.0.0.1:8080/docs"
+echo "All 5 workflows are published and the realtime webhook passed a no-exception smoke test."
+echo "n8n: http://127.0.0.1:${N8N_PORT}"
+echo "API docs: http://127.0.0.1:${ORDER_API_PORT}/docs"
 if [[ "${NO_OPEN:-false}" != "true" ]]; then
-  if command -v open >/dev/null; then open http://127.0.0.1:5678
-  elif command -v xdg-open >/dev/null; then xdg-open http://127.0.0.1:5678 >/dev/null 2>&1 || true
+  if command -v open >/dev/null; then open "http://127.0.0.1:${N8N_PORT}"
+  elif command -v xdg-open >/dev/null; then xdg-open "http://127.0.0.1:${N8N_PORT}" >/dev/null 2>&1 || true
   fi
 fi

@@ -6,6 +6,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 py_compile.compile(str(ROOT / "services/order-api/app.py"), doraise=True)
+for script in (ROOT / "scripts").glob("*.py"):
+    py_compile.compile(str(script), doraise=True)
 
 for script in (ROOT / "scripts").glob("*.ps1"):
     if not script.read_text(encoding="utf-8").strip():
@@ -18,6 +20,10 @@ for launcher in ("setup.cmd", "start.cmd", "stop.cmd", "configure-feishu.cmd", "
 for launcher in ("setup.sh", "start.sh", "stop.sh", "configure-feishu.sh", "import-orders.sh"):
     if not (ROOT / launcher).is_file():
         raise AssertionError(f"missing macOS/Linux launcher: {launcher}")
+
+for document in ("SECURITY.md", "docs/business-acceptance.md", "docs/operations-runbook.md"):
+    if not (ROOT / document).is_file():
+        raise AssertionError(f"missing operational document: {document}")
 
 required_nodes = {
     "01-realtime-order-exception.json": {"接收订单", "鉴权与标准化", "是否发现异常", "是否紧急风险"},
@@ -36,9 +42,24 @@ for filename, expected in required_nodes.items():
     if not data.get("connections"):
         raise AssertionError(f"{filename} has no connections")
 
+batch = json.loads((ROOT / "workflows" / "02-batch-order-scan.json").read_text(encoding="utf-8"))
+batch_reader = next(node for node in batch["nodes"] if node["name"] == "读取待巡检订单")
+if not batch_reader["parameters"].get("sendHeaders"):
+    raise AssertionError("batch order read must support protected read endpoints")
+
+review = json.loads((ROOT / "workflows" / "03-manual-review.json").read_text(encoding="utf-8"))
+review_writer = next(node for node in review["nodes"] if node["name"] == "保存复核与审计日志")
+if "expectedVersion" not in review_writer["parameters"].get("body", ""):
+    raise AssertionError("manual review must send optimistic concurrency version")
+
 compose = (ROOT / "compose.yaml").read_text(encoding="utf-8")
 if "n8n:latest" in compose:
     raise AssertionError("n8n image must be pinned")
+
+example_env = (ROOT / ".env.example").read_text(encoding="utf-8")
+for name in ("READ_API_KEY", "PROTECT_READ_ENDPOINTS", "ENABLE_API_DOCS", "NOTIFY_SEVERITIES", "N8N_SECURE_COOKIE"):
+    if f"{name}=" not in example_env:
+        raise AssertionError(f"missing environment setting: {name}")
 for tracked in ROOT.rglob("*"):
     if tracked.is_file() and ".git" not in tracked.parts and tracked.name != ".env":
         text = tracked.read_text(encoding="utf-8", errors="ignore")

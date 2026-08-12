@@ -21,11 +21,16 @@ POST /v1/orders/ingest
   "stock": 8,
   "riskScore": 86,
   "duplicatePayment": false,
-  "customer": "脱敏客户标识"
+  "customer": "脱敏客户标识",
+  "sourcePlatform": "ERP",
+  "storeId": "STORE-01",
+  "currency": "CNY"
 }
 ```
 
 `status` 支持 `PAID / SHIPPED / REFUNDING / COMPLETED / CANCELLED`。`eventId` 在同一次平台重试中必须保持相同，订单产生新变化时应使用新的事件版本。
+
+每次请求必须是该订单在当前时刻的完整快照。系统会依据新快照自动关闭已经恢复的确定性异常；如果只发送局部变更字段，默认值可能造成错误判断。金额以最多两位小数的十进制数传输，不使用二进制浮点作为业务金额存储语义。
 
 ## 请求签名
 
@@ -40,6 +45,8 @@ X-Signature: hex(HMAC-SHA256(INBOUND_WEBHOOK_SECRET, timestamp + "." + 原始请
 - [批量 CSV 适配器](../scripts/import_orders_csv.py)
 
 企业适配器还应负责平台回调验签、状态映射、分页或游标、平台限流、客户信息脱敏和失败补偿。淘宝、京东、抖店等正式接口需要企业自行提供开放平台授权，本仓库不包含或伪造这些凭证。
+
+人工复核请求必须携带异常当前 `version` 作为 `expectedVersion`。如果其他人员或自动流程已经更新异常，接口返回 `409`，调用方应重新读取后由操作人员确认，不应自动覆盖。
 
 ## 服务器部署
 
