@@ -25,6 +25,11 @@ for document in ("SECURITY.md", "docs/business-acceptance.md", "docs/operations-
     if not (ROOT / document).is_file():
         raise AssertionError(f"missing operational document: {document}")
 
+readme = (ROOT / "README.md").read_text(encoding="utf-8")
+for image_path in re.findall(r"!\[[^\]]*\]\((docs/images/[^)]+)\)", readme):
+    if not (ROOT / image_path).is_file():
+        raise AssertionError(f"README image does not exist: {image_path}")
+
 required_nodes = {
     "01-realtime-order-exception.json": {"接收订单", "鉴权与标准化", "是否发现异常", "是否紧急风险"},
     "02-batch-order-scan.json": {"每30分钟巡检", "汇总本轮巡检结果", "保存巡检审计", "是否存在紧急异常"},
